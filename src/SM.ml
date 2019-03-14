@@ -1,16 +1,18 @@
-open GT       
+open GT
 open Language
-       
+
+open List
+
 (* The type for the stack machine instructions *)
 @type insn =
 (* binary operator                 *) | BINOP of string
-(* put a constant on the stack     *) | CONST of int                 
+(* put a constant on the stack     *) | CONST of int
 (* read to stack                   *) | READ
 (* write from stack                *) | WRITE
 (* load a variable to the stack    *) | LD    of string
 (* store a variable from the stack *) | ST    of string with show
 
-(* The type for the stack machine program *)                                                               
+(* The type for the stack machine program *)
 type prg = insn list
 
 (* The type for the stack machine configuration: a stack and a configuration from statement
@@ -23,8 +25,18 @@ type config = int list * Stmt.config
      val eval : config -> prg -> config
 
    Takes a configuration and a program, and returns a configuration as a result
-*)                         
-let rec eval conf prog = failwith "Not yet implemented"
+*)
+let rec eval cfg prg =
+  let step (st, (s, i, o)) p = match p with
+    | BINOP op -> (Expr.eval_op op (hd (tl st)) (hd st) :: (tl (tl st)), (s, i, o))
+    | CONST n  -> (n :: st, (s, i, o))
+    | READ     -> (hd i :: st, (s, tl i, o))
+    | WRITE    -> (tl st, (s, i, o @ [hd st]))
+    | LD x     -> (s x :: st, (s, i, o))
+    | ST x     -> (tl st, (Expr.update x (hd st) s, i, o))
+  in match prg with
+    | [] -> cfg
+    | p :: ps -> eval (step cfg p) ps
 
 (* Top-level evaluation
 
