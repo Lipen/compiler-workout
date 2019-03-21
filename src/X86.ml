@@ -101,10 +101,10 @@ let rec compile env = function
         env, [Push s; Call "Lwrite"; Pop eax]
       | LD x ->
         let s, env = (env#global x)#allocate in
-        env, [Mov (M (env#loc x), s)]
+        env, [Mov (M (env#loc x), eax); Mov (eax, s)]
       | ST x ->
         let s, env = (env#global x)#pop in
-        env, [Mov (s, M (env#loc x))]
+        env, [Mov (s, eax); Mov (eax, M (env#loc x))]
       | BINOP op ->
         let rhs, lhs, env = env#pop2 in
         let zero x = Binop ("^", x, x) in
