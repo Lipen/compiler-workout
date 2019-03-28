@@ -16,10 +16,10 @@ open Language
 (* The type for the stack machine program *)
 type prg = insn list
 
-(* The type for the stack machine configuration: a stack and a configuration from statement
+(* The type for the stack machine configuration: control stack, stack and configuration from statement
    interpreter
  *)
-type config = int list * Stmt.config
+type config = (prg * State.t) list * int list * Stmt.config
 
 (* Stack machine interpreter
 
@@ -28,37 +28,37 @@ type config = int list * Stmt.config
    Takes an environment, a configuration and a program, and returns a configuration as a result. The
    environment is used to locate a label to jump to (via method env#labeled <label_name>)
 *)
-let rec eval env cfg prg = match prg with
+let rec eval env cfg prg =
+  match prg with
   | [] -> cfg
   | p::rest ->
-    let (st, c) = cfg in
+    let (cst, st, c) = cfg in
     let (s, i, o) = c in
-    (match p with
-      | BINOP op -> (match st with
-        | y::x::tail -> eval env (Expr.eval_op op x y :: tail, c) rest
-        | _ -> failwith "Impossible to BINOP")
-      | CONST n -> eval env (n :: st, c) rest
-      | READ -> (match i with
-        | z::tail -> eval env (z :: st, (s, tail, o)) rest
-        | _ -> failwith "Impossible to READ")
-      | WRITE -> (match st with
-        | z::tail -> eval env (tail, (s, i, o @ [z])) rest
-        | _ -> failwith "Impossible to WRITE")
-      | LD x -> eval env (s x :: st, c) rest
-      | ST x -> (match st with
-        | z::tail -> eval env (tail, (Expr.update x z s, i, o)) rest
-        | _ -> failwith "Impossible to ST")
-      | LABEL l -> eval env cfg rest
-      | JMP l -> eval env cfg (env#labeled l)
-      | CJMP (t, l) -> (match st with
-        | z::tail ->
-          if (t = "z" && z = 0 || t = "nz" && z != 0) then
-            eval env (tail, c) (env#labeled l)
-          else
-            eval env (tail, c) rest
-        | _ -> failwith "Impossible to CJMP")
-      | _ -> failwith "Unsupported operation"
-    );;
+    begin match p with
+    | BINOP op ->
+      let y::x::tail = st in
+      let result = Expr.eval s (Binop (op, Const x, Const y)) in
+      eval env (cst, result :: tail, c) rest
+    | CONST n -> eval env (cst, n :: st, c) rest
+    | READ ->
+      let z::tail = i in
+      eval env (cst, z :: st, (s, tail, o)) rest
+    | WRITE ->
+      let z::tail = st in
+      eval env (cst, tail, (s, i, o @ [z])) rest
+    | LD x -> eval env (cst, State.eval s x :: st, c) rest
+    | ST x ->
+      let z::tail = st in
+      eval env (cst, tail, (State.update x z s, i, o)) rest
+    | LABEL _ -> eval env cfg rest
+    | JMP l -> eval env cfg (env#labeled l)
+    | CJMP (mode, l) ->
+      let z::tail = st in
+      if (mode = "z" && z = 0 || mode = "nz" && z != 0) then
+        eval env (cst, tail, c) (env#labeled l)
+      else
+        eval env (cst, tail, c) rest
+    end
 
 (* Top-level evaluation
 
@@ -74,7 +74,7 @@ let run p i =
   | _ :: tl         -> make_map m tl
   in
   let m = make_map M.empty p in
-  let (_, (_, _, o)) = eval (object method labeled l = M.find l m end) ([], (Expr.empty, i, [])) p in o
+  let (_, _, (_, _, o)) = eval (object method labeled l = M.find l m end) ([], [], (State.empty, i, [])) p in o
 
 
 let label_generator =
@@ -88,31 +88,60 @@ let label_generator =
 
 (* Stack machine compiler
 
-     val compile : Language.Stmt.t -> prg
+     val compile : Language.t -> label -> (prg, flag_is_label_used)
 
    Takes a program in the source language and returns an equivalent program for the
    stack machine
 *)
-let rec compile s =
+let rec compile_with_label s label =
   let rec expr e = match e with
-    | Expr.Var   x          -> [LD x]
-    | Expr.Const n          -> [CONST n]
+    | Expr.Var x -> [LD x]
+    | Expr.Const n -> [CONST n]
     | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
   in
   match s with
-    | Stmt.Read x        -> [READ; ST x]
-    | Stmt.Write e       -> expr e @ [WRITE]
-    | Stmt.Assign (x, e) -> expr e @ [ST x]
-    | Stmt.Seq (s1, s2)  -> compile s1 @ compile s2
-    | Stmt.Skip          -> []
-    | If (e, s1, s2) ->
-      let l_else = label_generator#generate in
-      let l_fi = label_generator#generate in
-      expr e @ [CJMP ("z", l_else)] @ compile s1 @ [JMP l_fi; LABEL l_else] @ compile s2 @ [LABEL l_fi]
-    | While (e, s) ->
-      let l_loop = label_generator#generate in
-      let l_od = label_generator#generate in
-      [LABEL l_loop] @ expr e @ [CJMP ("z", l_od)] @ compile s @ [JMP l_loop; LABEL l_od]
-    | RepeatUntil (s, e) ->
-      let l_loop = label_generator#generate in
-      [LABEL l_loop] @ compile s @ expr e @ [CJMP ("z", l_loop)]
+  | Stmt.Read x -> ([READ; ST x], false)
+  | Stmt.Write e -> (expr e @ [WRITE], false)
+  | Stmt.Assign (x, e) -> (expr e @ [ST x], false)
+  | Stmt.Seq (s1, s2)  ->
+    let label' = label_generator#generate in
+    let (compiled1, used1) = compile_with_label s1 label' in
+    let (compiled2, used2) = compile_with_label s2 label in
+    (compiled1 @ (if used1 then [LABEL label'] else []) @ compiled2, used2)
+  | Stmt.Skip -> ([], false)
+  | Stmt.If (cond, s1, s2) ->
+    let l_else = label_generator#generate in
+    let (compiled1, used1) = compile_with_label s1 label in
+    let (compiled2, used2) = compile_with_label s2 label in
+    (expr cond
+      @ [CJMP ("z", l_else)]
+      @ compiled1
+      @ (if used1 then [] else [JMP label])
+      @ [LABEL l_else]
+      @ compiled2
+      @ (if used2 then [] else [JMP label])
+    , true)
+  | Stmt.While (cond, body) ->
+    let l_cond = label_generator#generate in
+    let l_loop = label_generator#generate in
+    let (compiled_body, _) = compile_with_label body l_cond in
+    ([JMP l_cond; LABEL l_loop]
+      @ compiled_body
+      @ [LABEL l_cond]
+      @ expr cond
+      @ [CJMP ("nz", l_loop)]
+    , false)
+  | Stmt.RepeatUntil (body, cond) ->
+    let l_loop = label_generator#generate in
+    let (compiled_body, _) = compile_with_label body label in
+    ([LABEL l_loop]
+      @ compiled_body
+      @ expr cond
+      @ [CJMP ("z", l_loop)]
+    , false)
+  ;;
+
+let compile p =
+  let label = label_generator#generate in
+  let (compiled, used) = compile_with_label p label in
+  compiled @ (if used then [LABEL label] else [])
